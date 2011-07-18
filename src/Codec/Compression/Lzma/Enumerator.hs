@@ -9,11 +9,7 @@ import Control.Monad
 import Control.Monad.Trans
 import qualified Data.Enumerator as E
 import qualified Data.Enumerator.List as EL
-import Debug.Trace (trace)
 import Foreign
-import Foreign.C.String
-import Foreign.C.Types
-import Foreign.Storable
 import Bindings.Lzma
 
 prettyRet :: C'lzma_ret -> String
@@ -50,20 +46,23 @@ initStream name fun = do
     then return streamPtr
     else fail $ name ++ " failed: " ++ prettyRet ret
 
-easyEncoder :: Ptr C'lzma_stream -> IO C'lzma_ret
-easyEncoder ptr = c'lzma_easy_encoder ptr c'LZMA_PRESET_DEFAULT c'LZMA_CHECK_CRC64
+easyEncoder :: Maybe Int -> Ptr C'lzma_stream -> IO C'lzma_ret
+easyEncoder level ptr = c'lzma_easy_encoder ptr (maybe c'LZMA_PRESET_DEFAULT fromIntegral level) c'LZMA_CHECK_CRC64
 
 autoDecoder :: Maybe Word64 -> Ptr C'lzma_stream -> IO C'lzma_ret
 autoDecoder memlimit ptr = c'lzma_auto_decoder ptr (maybe maxBound fromIntegral memlimit) 0
 
+-- | Compress a 'B.ByteString' 'E.Enumerator' into an xz container stream.
 compress :: MonadIO m
-         => E.Enumeratee B.ByteString B.ByteString m b
-compress step = do
-  streamPtr <- E.tryIO $ initStream "lzma_easy_encoder" easyEncoder
+         => Maybe Int -- ^ Compression level from [0..9], defaults to 6.
+         -> E.Enumeratee B.ByteString B.ByteString m b
+compress level step = do
+  streamPtr <- E.tryIO $ initStream "lzma_easy_encoder" (easyEncoder level)
   codeEnum streamPtr step
 
+-- | Decompress a 'B.ByteString' 'E.Enumerator' from an lzma or xz container stream.
 decompress :: MonadIO m
-           => Maybe Word64 
+           => Maybe Word64 -- ^ Memory limit, in bytes.
            -> E.Enumeratee B.ByteString B.ByteString m b
 decompress memlimit step = do
   streamPtr <- E.tryIO $ initStream "lzma_auto_decoder" (autoDecoder memlimit)
@@ -80,12 +79,7 @@ codeEnum streamPtr (E.Continue k) = do
         pokeNextIn streamPtr ptr
         pokeAvailIn streamPtr $ fromIntegral len
         buildChunks streamPtr c'LZMA_RUN
-    Nothing -> do
-      availIn <- peekAvailIn streamPtr
-      availOut <- peekAvailOut streamPtr
-      if availIn > 0 || availOut < bufferSize
-        then buildChunks streamPtr c'LZMA_FINISH
-        else return E.EOF
+    Nothing -> buildChunks streamPtr c'LZMA_FINISH
   step <- lift $ E.runIteratee (k chunks)
   codeEnum streamPtr step
 
@@ -98,7 +92,7 @@ codeEnum streamPtr step = do
 buildChunks :: Ptr C'lzma_stream
             -> C'lzma_action
             -> IO (E.Stream B.ByteString)
-buildChunks streamPtr action = liftM E.Chunks go where
+buildChunks streamPtr action = go where
   go = do
     ret <- c'lzma_code streamPtr action 
     if ret /= c'LZMA_OK && ret /= c'LZMA_STREAM_END
@@ -107,13 +101,23 @@ buildChunks streamPtr action = liftM E.Chunks go where
         availIn <- peekAvailIn streamPtr
         availOut <- peekAvailOut streamPtr
         case () of
-          _ | availIn > 0 && availOut > 0 -> go
-            | (availIn > 0 && availOut == 0) ||
-              (action == c'LZMA_FINISH && availOut < bufferSize) -> do
-                chunk <- getOutChunk streamPtr
-                tail <- go
-                return $ chunk:tail
-            | otherwise -> return []
+          -- the normal case, the coder has provided some data...
+          -- it'd be more efficient to return a single buffer but this is easier to implement.
+          _ | availOut < bufferSize -> do
+                x <- getOutChunk streamPtr
+                xs <- go
+                return $ E.Chunks $ case xs of
+                  E.Chunks xs' -> x:xs'
+                  E.EOF        -> x:[] 
+          -- the inner enumerator has finished, we need to flush the results out of the lzma_stream
+            | action == c'LZMA_FINISH -> if ret /= c'LZMA_STREAM_END
+                                           then go
+                                           else return E.EOF
+          -- the input buffer points into a pinned bytestring, so we need to make sure it's been
+          -- fully loaded (availIn == 0) before returning
+            | availIn > 0 -> go
+          -- filling the lzma_stream buffer, nothing to return yet
+            | otherwise -> return $ E.Chunks []
 
 getOutChunk :: Ptr C'lzma_stream
             -> IO B.ByteString
