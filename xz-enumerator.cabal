@@ -1,0 +1,38 @@
+name:                xz-enumerator
+version:             0.1.0
+synopsis:            xz iteratee.
+description:
+  High level bindings to xz-utils.
+  .
+license:             BSD3
+license-file:        LICENSE
+author:              Nathan Howell <nhowell@alphaheavy.com>
+maintainer:          Nathan Howell <nhowell@alphaheavy.com>
+homepage:            http://github.com/alphaHeavy/xz-enumerator
+bug-reports:         http://github.com/alphaHeavy/xz-enumerator/issues
+category:            FFI, Codec, Compression
+
+build-type:          Simple
+cabal-version:       >= 1.2.3
+
+library
+  hs-source-dirs:
+    src
+  exposed-modules:
+    Bindings.Lzma
+    Codec.Compression.Lzma.Enumerator
+  build-depends:
+    base         >= 3      && < 5,
+    bindings-DSL >= 1.0    && < 1.1,
+    bytestring   >= 0.9.1  && < 0.10,
+    enumerator   >= 0.4.10 && < 0.5,
+    mtl          >= 2      && < 3
+  ghc-options:
+    -Wall
+  extensions:
+    ForeignFunctionInterface
+  includes:
+    lzma.h
+  extra-libraries:
+    lzma
+
