@@ -1,5 +1,6 @@
 module Codec.Compression.Lzma.Enumerator
   ( compress
+  , decompress
   ) where
 
 import qualified Data.ByteString as B
@@ -36,7 +37,7 @@ bufferSize = 4096
 
 compress :: MonadIO m
          => E.Enumeratee B.ByteString B.ByteString m b
-compress step = trace "compress" $ do
+compress step = do
   streamPtr <- E.tryIO $ do
     buffer <- mallocBytes bufferSize
     streamPtr <- new C'lzma_stream
@@ -51,7 +52,53 @@ compress step = trace "compress" $ do
       then return streamPtr
       else fail $ "c'lzma_easy_encoder failed: " ++ prettyRet ret
 
-  compress' streamPtr step
+  codeEnum streamPtr step
+
+decompress :: MonadIO m
+           => Maybe Word64 
+           -> E.Enumeratee B.ByteString B.ByteString m b
+decompress memlimit step = do
+  streamPtr <- E.tryIO $ do
+    buffer <- mallocBytes bufferSize
+    streamPtr <- new C'lzma_stream
+          { c'lzma_stream'next_in   = nullPtr
+          , c'lzma_stream'avail_in  = 0
+          , c'lzma_stream'total_in  = 0
+          , c'lzma_stream'next_out  = buffer
+          , c'lzma_stream'avail_out = bufferSize 
+          , c'lzma_stream'total_out = 0 }
+    ret <- c'lzma_auto_decoder streamPtr (maybe maxBound fromIntegral memlimit) 0
+    if ret == c'LZMA_OK
+      then return streamPtr
+      else fail $ "c'lzma_easy_encoder failed: " ++ prettyRet ret
+
+  codeEnum streamPtr step
+
+codeEnum :: MonadIO m
+         => Ptr C'lzma_stream
+         -> E.Enumeratee B.ByteString B.ByteString m b
+codeEnum streamPtr (E.Continue k) = do
+  chunk <- EL.head
+  chunks <- E.tryIO $ case chunk of
+    Just chunk' ->
+      B.unsafeUseAsCStringLen chunk' $ \ (ptr, len) -> do
+        pokeNextIn streamPtr ptr
+        pokeAvailIn streamPtr $ fromIntegral len
+        buildChunks streamPtr c'LZMA_RUN
+    Nothing -> do
+      availIn <- peekAvailIn streamPtr
+      availOut <- peekAvailOut streamPtr
+      if availIn > 0 || availOut < bufferSize
+        then buildChunks streamPtr c'LZMA_FINISH
+        else return E.EOF
+  step <- lift $ E.runIteratee (k chunks)
+  codeEnum streamPtr step
+
+codeEnum streamPtr step = do
+  E.tryIO $ do
+    free =<< peekNextOut streamPtr
+    c'lzma_end streamPtr
+  return step
 
 buildChunks :: Ptr C'lzma_stream
             -> C'lzma_action
@@ -72,32 +119,6 @@ buildChunks streamPtr action = liftM E.Chunks go where
                 tail <- go
                 return $ chunk:tail
             | otherwise -> return []
-
-compress' :: MonadIO m
-          => Ptr C'lzma_stream
-          -> E.Enumeratee B.ByteString B.ByteString m b
-compress' streamPtr (E.Continue k) = do
-  chunk <- EL.head
-  chunks <- E.tryIO $ case chunk of
-    Just chunk' ->
-      B.unsafeUseAsCStringLen chunk' $ \ (ptr, len) -> do
-        pokeNextIn streamPtr ptr
-        pokeAvailIn streamPtr $ fromIntegral len
-        buildChunks streamPtr c'LZMA_RUN
-    Nothing -> do
-      availIn <- peekAvailIn streamPtr
-      availOut <- peekAvailOut streamPtr
-      if availIn > 0 || availOut < bufferSize
-        then buildChunks streamPtr c'LZMA_FINISH
-        else return E.EOF
-  step <- lift $ E.runIteratee (k chunks)
-  compress' streamPtr step
-
-compress' streamPtr step = do
-  E.tryIO $ do
-    free =<< peekNextOut streamPtr
-    c'lzma_end streamPtr
-  return step
 
 getOutChunk :: Ptr C'lzma_stream
             -> IO B.ByteString
