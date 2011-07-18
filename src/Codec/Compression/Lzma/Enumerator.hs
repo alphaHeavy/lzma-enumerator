@@ -35,43 +35,38 @@ prettyRet r
 bufferSize :: Num a => a
 bufferSize = 4096
 
+initStream :: String -> (Ptr C'lzma_stream -> IO C'lzma_ret) -> IO (Ptr C'lzma_stream)
+initStream name fun = do
+  buffer <- mallocBytes bufferSize
+  streamPtr <- new C'lzma_stream
+    { c'lzma_stream'next_in   = nullPtr
+    , c'lzma_stream'avail_in  = 0
+    , c'lzma_stream'total_in  = 0
+    , c'lzma_stream'next_out  = buffer
+    , c'lzma_stream'avail_out = bufferSize 
+    , c'lzma_stream'total_out = 0 }
+  ret <- fun streamPtr
+  if ret == c'LZMA_OK
+    then return streamPtr
+    else fail $ name ++ " failed: " ++ prettyRet ret
+
+easyEncoder :: Ptr C'lzma_stream -> IO C'lzma_ret
+easyEncoder ptr = c'lzma_easy_encoder ptr c'LZMA_PRESET_DEFAULT c'LZMA_CHECK_CRC64
+
+autoDecoder :: Maybe Word64 -> Ptr C'lzma_stream -> IO C'lzma_ret
+autoDecoder memlimit ptr = c'lzma_auto_decoder ptr (maybe maxBound fromIntegral memlimit) 0
+
 compress :: MonadIO m
          => E.Enumeratee B.ByteString B.ByteString m b
 compress step = do
-  streamPtr <- E.tryIO $ do
-    buffer <- mallocBytes bufferSize
-    streamPtr <- new C'lzma_stream
-          { c'lzma_stream'next_in   = nullPtr
-          , c'lzma_stream'avail_in  = 0
-          , c'lzma_stream'total_in  = 0
-          , c'lzma_stream'next_out  = buffer
-          , c'lzma_stream'avail_out = bufferSize 
-          , c'lzma_stream'total_out = 0 }
-    ret <- c'lzma_easy_encoder streamPtr c'LZMA_PRESET_DEFAULT c'LZMA_CHECK_CRC64
-    if ret == c'LZMA_OK
-      then return streamPtr
-      else fail $ "c'lzma_easy_encoder failed: " ++ prettyRet ret
-
+  streamPtr <- E.tryIO $ initStream "lzma_easy_encoder" easyEncoder
   codeEnum streamPtr step
 
 decompress :: MonadIO m
            => Maybe Word64 
            -> E.Enumeratee B.ByteString B.ByteString m b
 decompress memlimit step = do
-  streamPtr <- E.tryIO $ do
-    buffer <- mallocBytes bufferSize
-    streamPtr <- new C'lzma_stream
-          { c'lzma_stream'next_in   = nullPtr
-          , c'lzma_stream'avail_in  = 0
-          , c'lzma_stream'total_in  = 0
-          , c'lzma_stream'next_out  = buffer
-          , c'lzma_stream'avail_out = bufferSize 
-          , c'lzma_stream'total_out = 0 }
-    ret <- c'lzma_auto_decoder streamPtr (maybe maxBound fromIntegral memlimit) 0
-    if ret == c'LZMA_OK
-      then return streamPtr
-      else fail $ "c'lzma_easy_encoder failed: " ++ prettyRet ret
-
+  streamPtr <- E.tryIO $ initStream "lzma_auto_decoder" (autoDecoder memlimit)
   codeEnum streamPtr step
 
 codeEnum :: MonadIO m
