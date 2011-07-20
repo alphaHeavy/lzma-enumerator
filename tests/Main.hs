@@ -19,14 +19,20 @@ tests =
   , testGroup "Chained" chainedTests
   ]
 
-compressTests = [testProperty "compressAndDiscard" prop_compressAndDiscard]
+compressTests =
+  [ testProperty "compressAndDiscard" prop_compressAndDiscard
+  , testProperty "compressAndCheckLength" prop_compressAndCheckLength
+  ]
 
 decompressTests =
   [ testProperty "decompressRandom" prop_decompressRandom
   , testProperty "decompressCorrupt" prop_decompressCorrupt
   ]
 
-chainedTests = [testProperty "chain" prop_chain]
+chainedTests =
+  [ testProperty "chain" prop_chain
+  , testProperty "compressThenDecompress" prop_compressThenDecompress
+  ]
 
 someString :: Gen B.ByteString
 someString = do
@@ -43,10 +49,23 @@ prop_compressAndDiscard :: Property
 prop_compressAndDiscard = monadicIO $ forAllM someBigString $ \ str -> do
   run $ E.run_ $ E.enumList 2 [str] E.$$ E.joinI (compress Nothing E.$$ dropAll)
 
+prop_compressAndCheckLength :: Property
+prop_compressAndCheckLength = monadicIO $ forAllM someBigString $ \ str -> do
+  len <- run $ E.run_ $ E.enumList 2 [str] E.$$ E.joinI (compress Nothing E.$$ EL.fold (\ acc el -> acc + B.length el) 0)
+  assert (len - 32 > B.length str `div` 2) -- random strings don't compress very well
+
 prop_chain :: Property
 prop_chain = monadicIO $ forAllM someBigString $ \ str -> do
+  str' <- run $ E.run_ $ E.enumList 2 [str] E.$$ E.joinI (compress Nothing E.$$ E.joinI (decompress Nothing E.$$ EL.consume))
+  return $ str == B.concat str'
+
+prop_compressThenDecompress :: Property
+prop_compressThenDecompress = monadicIO $ forAllM someBigString $ \ str -> do
   blob <- run $ E.run_ $ E.enumList 2 [str] E.$$ E.joinI (compress Nothing E.$$ EL.consume)
-  str' <- run $ E.run_ $ E.enumList 2 blob E.$$ E.joinI (decompress Nothing E.$$ EL.consume)
+  let blob' = B.concat blob
+  randIdx <- pick $ elements [0..B.length blob'-1]
+  let resplit = let (x,y) = B.splitAt randIdx blob' in [x,y]
+  str' <- run $ E.run_ $ E.enumList 2 resplit E.$$ E.joinI (decompress Nothing E.$$ EL.consume)
   return $ str == B.concat str'
 
 prop_decompressRandom :: Property
