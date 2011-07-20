@@ -5,11 +5,12 @@ module Codec.Compression.Lzma.Enumerator
 
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Unsafe as B
-import Control.Monad
+import Control.Monad (liftM)
 import Control.Monad.Trans
 import qualified Data.Enumerator as E
 import qualified Data.Enumerator.List as EL
 import Foreign
+import Foreign.C.Types (CSize)
 import Bindings.Lzma
 
 prettyRet :: C'lzma_ret -> String
@@ -72,59 +73,97 @@ codeEnum :: MonadIO m
          => Ptr C'lzma_stream
          -> E.Enumeratee B.ByteString B.ByteString m b
 codeEnum streamPtr (E.Continue k) = do
-  chunk <- EL.head
-  chunks <- E.tryIO $ case chunk of
-    Just chunk' ->
-      B.unsafeUseAsCStringLen chunk' $ \ (ptr, len) -> do
-        pokeNextIn streamPtr ptr
-        pokeAvailIn streamPtr $ fromIntegral len
-        buildChunks streamPtr c'LZMA_RUN
-    Nothing -> buildChunks streamPtr c'LZMA_FINISH
+  availOut <- E.tryIO $ peekAvailOut streamPtr
+  chunks <- if availOut < bufferSize
+    -- always try to drain the output buffer before reading any data
+    then E.tryIO $ buildChunk streamPtr availOut
+    else do
+      chunk <- EL.head
+      E.tryIO $ case chunk of
+        -- pin the bytestring and make sure it's been fully
+        -- loaded into the native lzma_stream
+        Just chunk' -> do
+          chunks <- B.unsafeUseAsCStringLen chunk' $ \ (ptr, len) -> do
+            pokeNextIn streamPtr ptr
+            pokeAvailIn streamPtr $ fromIntegral len
+            buildChunks streamPtr c'LZMA_RUN c'LZMA_OK
+          -- sanity check, make sure it's actually been read
+          availIn <- peekAvailIn streamPtr
+          if availIn /= 0
+            then fail $ "c'lzma_stream'avail_in == " ++ show availIn ++ ", should be 0" 
+            else return chunks
+        -- once we're at the end of the enumerator flush the lzma_stream
+        Nothing -> do
+            pokeNextIn streamPtr nullPtr
+            pokeAvailIn streamPtr 0
+            buildChunks streamPtr c'LZMA_FINISH c'LZMA_OK
   step <- lift $ E.runIteratee (k chunks)
   codeEnum streamPtr step
 
 codeEnum streamPtr step = do
   E.tryIO $ do
     free =<< peekNextOut streamPtr
+    pokeNextOut streamPtr nullPtr
     c'lzma_end streamPtr
   return step
 
 buildChunks :: Ptr C'lzma_stream
             -> C'lzma_action
+            -> C'lzma_ret
             -> IO (E.Stream B.ByteString)
-buildChunks streamPtr action = go where
-  go = do
-    ret <- c'lzma_code streamPtr action 
-    if ret /= c'LZMA_OK && ret /= c'LZMA_STREAM_END
-      then fail $ "c'lzma_code failed: " ++ prettyRet ret
-      else do
-        availIn <- peekAvailIn streamPtr
-        availOut <- peekAvailOut streamPtr
-        case () of
-          -- the normal case, the coder has provided some data...
-          -- it'd be more efficient to return a single buffer but this is easier to implement.
-          _ | availOut < bufferSize -> do
-                x <- getOutChunk streamPtr
-                xs <- go
-                return $ E.Chunks $ case xs of
-                  E.Chunks xs' -> x:xs'
-                  E.EOF        -> x:[] 
-          -- the inner enumerator has finished, we need to flush the results out of the lzma_stream
-            | action == c'LZMA_FINISH -> if ret /= c'LZMA_STREAM_END
-                                           then go
-                                           else return E.EOF
-          -- the input buffer points into a pinned bytestring, so we need to make sure it's been
-          -- fully loaded (availIn == 0) before returning
-            | availIn > 0 -> go
-          -- filling the lzma_stream buffer, nothing to return yet
-            | otherwise -> return $ E.Chunks []
-
-getOutChunk :: Ptr C'lzma_stream
-            -> IO B.ByteString
-getOutChunk streamPtr = do
+buildChunks streamPtr action status = do
+  availIn <- peekAvailIn streamPtr
   availOut <- peekAvailOut streamPtr
-  if availOut < bufferSize
-    then do
+  codeStep streamPtr action status availIn availOut
+
+codeStep :: Ptr C'lzma_stream
+         -> C'lzma_action
+         -> C'lzma_ret
+         -> CSize
+         -> CSize
+         -> IO (E.Stream B.ByteString)
+codeStep streamPtr action status availIn availOut
+  -- the inner enumerator has finished and we're done flushing the coder
+  | availOut == bufferSize && availIn == 0 &&
+    action == c'LZMA_FINISH && status == c'LZMA_STREAM_END =
+      return E.EOF
+
+  -- the normal case, we have some results..
+  | availOut < bufferSize = do
+      x <- getChunk streamPtr availOut
+      if availIn == 0 -- no more input, stop processing
+        then return $ E.Chunks [x]
+        else do
+          -- run lzma_code forward just far enough to read all the input buffer
+          xs <- buildChunks streamPtr action status
+          case xs of
+            E.Chunks xs' -> return $ E.Chunks (x:xs')
+            E.EOF        -> return $ E.Chunks [x]
+
+  -- the input buffer points into a pinned bytestring, so we need to make sure it's been
+  -- fully loaded (availIn == 0) before returning
+  | availIn > 0 || action == c'LZMA_FINISH = do
+      ret <- c'lzma_code streamPtr action
+      if ret == c'LZMA_OK || ret == c'LZMA_STREAM_END
+        then buildChunks streamPtr action ret
+        else fail $ "lzma_code failed: " ++ prettyRet ret
+
+  -- nothing to do here 
+  | otherwise = return $ E.Chunks []
+
+buildChunk :: Ptr C'lzma_stream
+           -> CSize
+           -> IO (E.Stream B.ByteString)
+buildChunk streamPtr availOut =
+  liftM E.Chunks $ if availOut < bufferSize
+    then fmap (:[]) $ getChunk streamPtr availOut
+    else return []
+
+getChunk :: Ptr C'lzma_stream
+         -> CSize
+         -> IO B.ByteString
+getChunk streamPtr availOut
+  | availOut < bufferSize = do
       nextOut <- peekNextOut streamPtr
       let avail = bufferSize - fromIntegral availOut
           baseBuffer = nextOut `plusPtr` (-avail)
@@ -133,5 +172,5 @@ getOutChunk streamPtr = do
       -- B.pack* copies the buffer, so reuse it
       pokeNextOut streamPtr baseBuffer
       return bs
-    else return B.empty
+  | otherwise = return B.empty
 
