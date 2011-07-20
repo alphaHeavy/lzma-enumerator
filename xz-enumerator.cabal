@@ -58,3 +58,7 @@ test-suite xz-test
     HUnit                      >= 1.2.2.3,
     QuickCheck                 >= 2.4.0.1
 
+source-repository head
+  type:     git
+  location: https://github.com/alphaHeavy/xz-enumerator.git
+
