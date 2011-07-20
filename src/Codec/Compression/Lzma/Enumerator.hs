@@ -5,7 +5,7 @@ module Codec.Compression.Lzma.Enumerator
 
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Unsafe as B
-import Control.Monad (liftM)
+import Control.Monad (forM_, liftM)
 import Control.Monad.Trans
 import qualified Data.Enumerator as E
 import qualified Data.Enumerator.List as EL
@@ -32,10 +32,19 @@ prettyRet r
 bufferSize :: Num a => a
 bufferSize = 4096
 
+memset :: Storable a => Ptr a -> Word8 -> IO ()
+memset ptr val = memset' ptr undefined where
+  memset' :: Storable a => Ptr a -> a -> IO ()
+  memset' _ a = 
+    forM_ [0..sizeOf a - 1] $ \ i ->
+      pokeByteOff ptr i val
+
 initStream :: String -> (Ptr C'lzma_stream -> IO C'lzma_ret) -> IO (Ptr C'lzma_stream)
 initStream name fun = do
   buffer <- mallocBytes bufferSize
-  streamPtr <- new C'lzma_stream
+  streamPtr <- malloc
+  memset streamPtr 0
+  poke streamPtr C'lzma_stream
     { c'lzma_stream'next_in   = nullPtr
     , c'lzma_stream'avail_in  = 0
     , c'lzma_stream'total_in  = 0
