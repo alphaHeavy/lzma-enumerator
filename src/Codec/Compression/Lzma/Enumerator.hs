@@ -133,8 +133,7 @@ codeStep :: Ptr C'lzma_stream
          -> IO (E.Stream B.ByteString)
 codeStep streamPtr action status availIn availOut
   -- the inner enumerator has finished and we're done flushing the coder
-  | availOut == bufferSize && availIn == 0 &&
-    action == c'LZMA_FINISH && status == c'LZMA_STREAM_END =
+  | availOut == bufferSize && status == c'LZMA_STREAM_END =
       return E.EOF
 
   -- the normal case, we have some results..
