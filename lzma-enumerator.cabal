@@ -1,6 +1,6 @@
 name:                lzma-enumerator
 version:             0.1.1
-synopsis:            lzma/xz iteratee.
+synopsis:            Enumerator interface for lzma/xz compression.
 description:
   High level bindings to xz-utils.
   .
@@ -10,10 +10,13 @@ author:              Nathan Howell <nhowell@alphaheavy.com>
 maintainer:          Nathan Howell <nhowell@alphaheavy.com>
 homepage:            http://github.com/alphaHeavy/lzma-enumerator
 bug-reports:         http://github.com/alphaHeavy/lzma-enumerator/issues
-category:            FFI, Codec, Compression
+category:            Codec, Compression, Enumerator
 
 build-type:          Simple
 cabal-version:       >= 1.10
+
+extra-source-files:
+  tests/Main.hs
 
 library
   default-language:
