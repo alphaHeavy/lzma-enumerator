@@ -1,5 +1,5 @@
 name:                lzma-enumerator
-version:             0.1.1
+version:             0.1.2
 synopsis:            Enumerator interface for lzma/xz compression.
 description:
   High level bindings to xz-utils.

@@ -114,6 +114,7 @@ codeEnum streamPtr step = do
     free =<< peekNextOut streamPtr
     pokeNextOut streamPtr nullPtr
     c'lzma_end streamPtr
+    free streamPtr
   return step
 
 buildChunks :: Ptr C'lzma_stream
