@@ -140,7 +140,7 @@ codeStep streamPtr action status availIn availOut
   -- the normal case, we have some results..
   | availOut < bufferSize = do
       x <- getChunk streamPtr availOut
-      if availIn == 0 -- no more input, stop processing
+      if availIn == 0 && action /= c'LZMA_FINISH -- no more input, stop processing
         then return $ E.Chunks [x]
         else do
           -- run lzma_code forward just far enough to read all the input buffer
