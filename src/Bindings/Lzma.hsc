@@ -6,6 +6,8 @@ included in the liblinear archive, available for download at
 
 #include <bindings.dsl.h>
 #include <lzma.h>
+#include <stdio.h>
+#include <string.h>
 
 module Bindings.Lzma where
 #strict_import
